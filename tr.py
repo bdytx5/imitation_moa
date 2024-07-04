@@ -14,7 +14,6 @@ from trl import SFTTrainer
 
 ###### FOR MultiGPu training https://stackoverflow.com/questions/76675018/how-does-one-use-accelerate-with-the-hugging-face-hf-trainer
 # Login to Weights and Biases
-wandb.login(key="82cbd27eead1f27bb5cc79b0a83a3a70fd4595f0")
 
 # Seed for reproducibility
 torch.manual_seed(42)
