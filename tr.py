@@ -1,5 +1,6 @@
-from hf_olmo import *  # registers the Auto* classes
+# sfrom hf_olmo import *  # registers the Auto* classes
 import os
+from sys import path
 import torch
 from datasets import load_dataset, DatasetDict
 from peft import LoraConfig, get_peft_model
@@ -11,15 +12,18 @@ from transformers import (
     BitsAndBytesConfig,
 )
 from trl import SFTTrainer
-
+from datasets import Dataset, DatasetDict
+import json 
 ###### FOR MultiGPu training https://stackoverflow.com/questions/76675018/how-does-one-use-accelerate-with-the-hugging-face-hf-trainer
 # Login to Weights and Biases
+wandb.login(key="82cbd27eead1f27bb5cc79b0a83a3a70fd4595f0")
 
 # Seed for reproducibility
 torch.manual_seed(42)
 
+
 # Configuration
-model_name = "allenai/OLMo-7B-SFT"
+model_name = "openai-community/gpt2"
 max_seq_length = 2048
 output_dir = "./easy_align_results"
 num_train_epochs = 1
@@ -32,8 +36,28 @@ save_steps = 1000
 eval_steps = 1000
 warmup_steps = 10
 save_total_limit = 5  # Number of checkpoints to keep
-train_file_path = 'combined_completions_train.jsonl'
-val_file_path = 'combined_completions_val.jsonl'
+train_file_path = '/home/brett/Desktop/brain/synthetics/final_ds/train_completions.jsonl'
+val_file_path = '/home/brett/Desktop/brain/synthetics/final_ds/test_completions.jsonl'
+
+# Initialize tokenizer
+tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+
+
+def load_jsonl_data(file_path):
+    with open(file_path, 'r') as f:
+        data = [json.loads(line) for line in f]
+    return data
+
+train_data = load_jsonl_data(train_file_path)
+val_data = load_jsonl_data(val_file_path)
+
+# Convert data to Hugging Face Dataset format
+data_list_train = [dict(zip(train_data[0], t)) for t in zip(*[d.values() for d in train_data])]
+data_list_val = [dict(zip(val_data[0], t)) for t in zip(*[d.values() for d in val_data])]
+
+train_dataset = Dataset.from_list(data_list_train)
+val_dataset = Dataset.from_list(data_list_val)
+
 
 
 # Initialize tokenizer
@@ -42,8 +66,8 @@ tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
 # Load and filter dataset
 def load_and_filter_dataset(train_file_path, val_file_path, test_ratio=0.1):
     # Load dataset from JSONL file
-    train_dataset = load_dataset('json', data_files=train_file_path, split='train')
-    val_dataset = load_dataset('json', data_files=val_file_path, split='train')
+    train_dataset = load_dataset(path=train_file_path, split='train')
+    val_dataset = load_dataset(path=val_file_path, split='train')
 
     # Filter examples based on max_seq_length
     def filter_examples(example):
@@ -61,23 +85,42 @@ def load_and_filter_dataset(train_file_path, val_file_path, test_ratio=0.1):
     return train_test_dataset['train'], train_test_dataset['test'], filtered_val_dataset
 
 # Format chat template
+# def format_chat_template(example):
+#     return {'text': f"<|user|>\n{example['input']}\n<|model_name|>\n{example['model_name']}\n<|output|>\n{example['output']}\n"}
+
+
 def format_chat_template(example):
     return {'text': f"<|user|>\n{example['input']}\n<|model_name|>\n{example['model_name']}\n<|output|>\n{example['output']}\n"}
 
 # Load and process datasets
 
-train_dataset, test_dataset, val_dataset = load_and_filter_dataset(train_file_path, val_file_path)
+# train_dataset, test_dataset, val_dataset = load_and_filter_dataset(train_file_path, val_file_path)
 
 # Format and prepare datasets
 train_dataset = train_dataset.map(format_chat_template)
-test_dataset = test_dataset.map(format_chat_template)
+# test_dataset = test_dataset.map(format_chat_template)
 val_dataset = val_dataset.map(format_chat_template)
 
 print(f"Number of examples in the train set: {len(train_dataset)}")
-print(f"Number of examples in the test set: {len(test_dataset)}")
+# print(f"Number of examples in the test set: {len(test_dataset)}")
 print(f"Number of examples in the validation set: {len(val_dataset)}")
 
 # Create and prepare model
+# def create_and_prepare_model():
+#     peft_config = LoraConfig(
+#         r=16,
+#         lora_alpha=32,
+#         lora_dropout=0.1,
+#         bias="none",
+#         task_type="CAUSAL_LM",
+#         target_modules=["att_proj", "attn_out", "ff_proj", "ff_out"]
+#     )
+#     model = AutoModelForCausalLM.from_pretrained(model_name).to('cuda:0')
+#     lora_model = get_peft_model(model, peft_config)
+
+#     tokenizer.pad_token = tokenizer.eos_token
+#     return lora_model, peft_config, tokenizer
+
 def create_and_prepare_model():
     peft_config = LoraConfig(
         r=16,
@@ -88,10 +131,12 @@ def create_and_prepare_model():
         target_modules=["att_proj", "attn_out", "ff_proj", "ff_out"]
     )
     model = AutoModelForCausalLM.from_pretrained(model_name).to('cuda:0')
-    lora_model = get_peft_model(model, peft_config)
+    # lora_model = get_peft_model(model, peft_config)
 
     tokenizer.pad_token = tokenizer.eos_token
-    return lora_model, peft_config, tokenizer
+    return model, peft_config, tokenizer
+
+
 
 model, peft_config, tokenizer = create_and_prepare_model()
 
@@ -100,12 +145,12 @@ training_arguments = TrainingArguments(
     output_dir=output_dir,
     per_device_train_batch_size=per_device_train_batch_size,
     gradient_accumulation_steps=gradient_accumulation_steps,
-    optim="paged_adamw_8bit",
+    # optim="paged_adamw_8bit",
     save_total_limit=save_total_limit,
     logging_steps=logging_steps,
     learning_rate=learning_rate,
-    fp16=False,
-    bf16=True,
+    fp16=True,
+    bf16=False,
     evaluation_strategy="steps",
     eval_steps=eval_steps,
     warmup_steps=warmup_steps,
@@ -121,8 +166,8 @@ training_arguments = TrainingArguments(
 trainer = SFTTrainer(
     model=model,
     train_dataset=train_dataset,
-    eval_dataset=test_dataset,
-    peft_config=peft_config,
+    eval_dataset=val_dataset,
+    # peft_config=peft_config,
     dataset_text_field="text",
     max_seq_length=max_seq_length,
     tokenizer=tokenizer,
