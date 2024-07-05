@@ -24,7 +24,7 @@ torch.manual_seed(42)
 
 # Configuration
 model_name = "openai-community/gpt2"
-max_seq_length = 2048
+max_seq_length = 1024
 output_dir = "./easy_align_results"
 num_train_epochs = 1
 per_device_train_batch_size = 1
@@ -52,8 +52,10 @@ train_data = load_jsonl_data(train_file_path)
 val_data = load_jsonl_data(val_file_path)
 
 # Convert data to Hugging Face Dataset format
-data_list_train = [dict(zip(train_data[0], t)) for t in zip(*[d.values() for d in train_data])]
-data_list_val = [dict(zip(val_data[0], t)) for t in zip(*[d.values() for d in val_data])]
+
+# Convert data to Hugging Face Dataset format
+data_list_train = [dict(d) for d in train_data]
+data_list_val = [dict(d) for d in val_data]
 
 train_dataset = Dataset.from_list(data_list_train)
 val_dataset = Dataset.from_list(data_list_val)
@@ -101,6 +103,16 @@ train_dataset = train_dataset.map(format_chat_template)
 # test_dataset = test_dataset.map(format_chat_template)
 val_dataset = val_dataset.map(format_chat_template)
 
+
+# Filter examples based on max_seq_length
+def filter_examples(example):
+    combined_text = example['input']
+    tokens = tokenizer.encode(combined_text)
+    return len(tokens) < max_seq_length
+
+train_dataset = train_dataset.filter(filter_examples)
+val_dataset = val_dataset.filter(filter_examples)
+
 print(f"Number of examples in the train set: {len(train_dataset)}")
 # print(f"Number of examples in the test set: {len(test_dataset)}")
 print(f"Number of examples in the validation set: {len(val_dataset)}")
@@ -122,14 +134,15 @@ print(f"Number of examples in the validation set: {len(val_dataset)}")
 #     return lora_model, peft_config, tokenizer
 
 def create_and_prepare_model():
-    peft_config = LoraConfig(
-        r=16,
-        lora_alpha=32,
-        lora_dropout=0.1,
-        bias="none",
-        task_type="CAUSAL_LM",
-        target_modules=["att_proj", "attn_out", "ff_proj", "ff_out"]
-    )
+    # peft_config = LoraConfig(
+    #     r=16,
+    #     lora_alpha=32,
+    #     lora_dropout=0.1,
+    #     bias="none",
+    #     task_type="CAUSAL_LM",
+    #     target_modules=["att_proj", "attn_out", "ff_proj", "ff_out"]
+    # )
+    peft_config = 1
     model = AutoModelForCausalLM.from_pretrained(model_name).to('cuda:0')
     # lora_model = get_peft_model(model, peft_config)
 
@@ -149,18 +162,19 @@ training_arguments = TrainingArguments(
     save_total_limit=save_total_limit,
     logging_steps=logging_steps,
     learning_rate=learning_rate,
-    fp16=True,
+    fp16=False,
     bf16=False,
     evaluation_strategy="steps",
     eval_steps=eval_steps,
     warmup_steps=warmup_steps,
-    group_by_length=True,
+    # group_by_length=True,
     lr_scheduler_type="linear",
     report_to='wandb',
     save_steps=save_steps,
     save_strategy="steps",
     metric_for_best_model="eval_loss",
-    greater_is_better=False
+    greater_is_better=False, 
+    # use_cpu=True
 )
 
 trainer = SFTTrainer(
