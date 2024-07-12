@@ -1,4 +1,5 @@
 
+
 import os
 import torch
 from datasets import load_dataset, Dataset
@@ -17,15 +18,16 @@ import random
 # os.environ["NCCL_IB_DISABLE"] = "1"
 
 # Login to Weights and Biases
-wandb.login(key="82cbd27eead1f27bb5cc79b0a83a3a70fd4595f0")
 
-wandb.init(project="moa", entity='byyoung3')
+# wandb.init(project="moa", entity='byyoung3')
 # Seed for reproducibility
 torch.manual_seed(42)
 random.seed(42)
 
 # Configuration
-model_name = "microsoft/Phi-3-mini-4k-instruct"
+# model_name = "sshleifer/tiny-gpt2"
+model_name = "microsoft/Phi-3-mini-128k-instruct"
+# model_name = "microsoft/Phi-3-mini-4k-instruct"
 max_seq_length = 1024
 output_dir = "./results"
 num_train_epochs = 1
@@ -34,13 +36,15 @@ per_device_eval_batch_size = 1
 gradient_accumulation_steps = 32
 learning_rate = 5e-6
 logging_steps = 10
-save_steps = 20
-eval_steps = 20
+save_steps = 10
+eval_steps = 10
 warmup_steps = 0
-save_total_limit = 2  # will save best and latest 
+save_total_limit = 1  # will save best and latest 
 train_file_path = './final_ds/train_completions.jsonl'
 val_file_path = './final_ds/test_completions.jsonl'
+loss_exploded = False  
 gradient_checkpointing = True 
+precision = "fp16"
 
 # Initialize tokenizer
 tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
@@ -53,13 +57,6 @@ def load_jsonl_data(file_path):
 train_data = load_jsonl_data(train_file_path)
 val_data = load_jsonl_data(val_file_path)
 
-# Shuffle the data
-random.shuffle(train_data)
-random.shuffle(val_data)
-
-# Limit the data to the first 5000 for training and first 1000 for validation
-# train_data = train_data[:5000]
-# val_data = val_data[:1000]
 # Convert data to Hugging Face Dataset format
 data_list_train = [dict(d) for d in train_data]
 data_list_val = [dict(d) for d in val_data]
@@ -76,9 +73,17 @@ def filter_examples(example):
 train_dataset = train_dataset.filter(filter_examples)
 val_dataset = val_dataset.filter(filter_examples)
 
+
+
 # Format chat template
+
+# <|system|>
+# You are a helpful assistant.<|end|>
+# <|user|>
+# Question?<|end|>
+# <|assistant|>
 def format_chat_template(example):
-    return {'text': f"\n{example['input']}\n\n{example['model_name']}\n\n{example['output']}\n"}
+    return {'text': f"<|system|>You are a helpful assistant.<|end|>\n<|user|>{example['input']}<|end|>\n<|assistant|><|{example['model_name']}|>\n{example['output']}\n<|end|>"}
 
 # Format and prepare datasets
 train_dataset = train_dataset.map(format_chat_template)
@@ -88,7 +93,7 @@ print(f"Number of examples in the train set: {len(train_dataset)}")
 print(f"Number of examples in the validation set: {len(val_dataset)}")
 
 def create_and_prepare_model():
-    model = AutoModelForCausalLM.from_pretrained(model_name)
+    model = AutoModelForCausalLM.from_pretrained(model_name, trust_remote_code=True)
     tokenizer.pad_token = tokenizer.eos_token
     return model, tokenizer
 
@@ -103,8 +108,8 @@ training_arguments = TrainingArguments(
     save_total_limit=save_total_limit,
     logging_steps=logging_steps,
     learning_rate=learning_rate,
-    fp16=True,
-    bf16=False,
+    fp16=precision == "fp16",
+    bf16=precision == "bf16",
     evaluation_strategy="steps",
     eval_steps=eval_steps,
     warmup_steps=warmup_steps,
@@ -120,7 +125,7 @@ training_arguments = TrainingArguments(
 
 
 
-
+print("training")
 trainer = SFTTrainer(
     model=model,
     train_dataset=train_dataset,
@@ -133,6 +138,8 @@ trainer = SFTTrainer(
     packing=True,
 
 )
+print("training")
+
 trainer.train()
 
 
