@@ -1,47 +1,49 @@
-# sfrom hf_olmo import *  # registers the Auto* classes
+
 import os
-from sys import path
 import torch
-from datasets import load_dataset, DatasetDict
-from peft import LoraConfig, get_peft_model
-import wandb
+from datasets import load_dataset, Dataset
 from transformers import (
     AutoTokenizer,
     TrainingArguments,
     AutoModelForCausalLM,
-    BitsAndBytesConfig,
+    TrainerCallback,
 )
 from trl import SFTTrainer
-from datasets import Dataset, DatasetDict
-import json 
-###### FOR MultiGPu training https://stackoverflow.com/questions/76675018/how-does-one-use-accelerate-with-the-hugging-face-hf-trainer
+import wandb
+import json
+import random 
+# import os
+# os.environ["NCCL_P2P_DISABLE"] = "1"
+# os.environ["NCCL_IB_DISABLE"] = "1"
+
 # Login to Weights and Biases
 wandb.login(key="82cbd27eead1f27bb5cc79b0a83a3a70fd4595f0")
 
+wandb.init(project="moa", entity='byyoung3')
 # Seed for reproducibility
 torch.manual_seed(42)
-
+random.seed(42)
 
 # Configuration
-model_name = "openai-community/gpt2"
+model_name = "microsoft/Phi-3-mini-4k-instruct"
 max_seq_length = 1024
-output_dir = "./easy_align_results"
+output_dir = "./results"
 num_train_epochs = 1
 per_device_train_batch_size = 1
 per_device_eval_batch_size = 1
 gradient_accumulation_steps = 32
 learning_rate = 5e-6
-logging_steps = 5
-save_steps = 1000
-eval_steps = 1000
-warmup_steps = 10
-save_total_limit = 5  # Number of checkpoints to keep
-train_file_path = '/home/brett/Desktop/brain/synthetics/final_ds/train_completions.jsonl'
-val_file_path = '/home/brett/Desktop/brain/synthetics/final_ds/test_completions.jsonl'
+logging_steps = 10
+save_steps = 20
+eval_steps = 20
+warmup_steps = 0
+save_total_limit = 2  # will save best and latest 
+train_file_path = './final_ds/train_completions.jsonl'
+val_file_path = './final_ds/test_completions.jsonl'
+gradient_checkpointing = True 
 
 # Initialize tokenizer
 tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-
 
 def load_jsonl_data(file_path):
     with open(file_path, 'r') as f:
@@ -51,58 +53,19 @@ def load_jsonl_data(file_path):
 train_data = load_jsonl_data(train_file_path)
 val_data = load_jsonl_data(val_file_path)
 
-# Convert data to Hugging Face Dataset format
+# Shuffle the data
+random.shuffle(train_data)
+random.shuffle(val_data)
 
+# Limit the data to the first 5000 for training and first 1000 for validation
+# train_data = train_data[:5000]
+# val_data = val_data[:1000]
 # Convert data to Hugging Face Dataset format
 data_list_train = [dict(d) for d in train_data]
 data_list_val = [dict(d) for d in val_data]
 
 train_dataset = Dataset.from_list(data_list_train)
 val_dataset = Dataset.from_list(data_list_val)
-
-
-
-# Initialize tokenizer
-tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-
-# Load and filter dataset
-def load_and_filter_dataset(train_file_path, val_file_path, test_ratio=0.1):
-    # Load dataset from JSONL file
-    train_dataset = load_dataset(path=train_file_path, split='train')
-    val_dataset = load_dataset(path=val_file_path, split='train')
-
-    # Filter examples based on max_seq_length
-    def filter_examples(example):
-        combined_text = example['input']
-        tokens = tokenizer.encode(combined_text)
-        return len(tokens) < max_seq_length
-
-    filtered_train_dataset = train_dataset.filter(filter_examples)
-    filtered_val_dataset = val_dataset.filter(filter_examples)
-
-    # Shuffle and split dataset
-    shuffled_train_dataset = filtered_train_dataset.shuffle(seed=42)
-    train_test_dataset = shuffled_train_dataset.train_test_split(test_size=test_ratio)
-
-    return train_test_dataset['train'], train_test_dataset['test'], filtered_val_dataset
-
-# Format chat template
-# def format_chat_template(example):
-#     return {'text': f"<|user|>\n{example['input']}\n<|model_name|>\n{example['model_name']}\n<|output|>\n{example['output']}\n"}
-
-
-def format_chat_template(example):
-    return {'text': f"<|user|>\n{example['input']}\n<|model_name|>\n{example['model_name']}\n<|output|>\n{example['output']}\n"}
-
-# Load and process datasets
-
-# train_dataset, test_dataset, val_dataset = load_and_filter_dataset(train_file_path, val_file_path)
-
-# Format and prepare datasets
-train_dataset = train_dataset.map(format_chat_template)
-# test_dataset = test_dataset.map(format_chat_template)
-val_dataset = val_dataset.map(format_chat_template)
-
 
 # Filter examples based on max_seq_length
 def filter_examples(example):
@@ -113,69 +76,50 @@ def filter_examples(example):
 train_dataset = train_dataset.filter(filter_examples)
 val_dataset = val_dataset.filter(filter_examples)
 
+# Format chat template
+def format_chat_template(example):
+    return {'text': f"\n{example['input']}\n\n{example['model_name']}\n\n{example['output']}\n"}
+
+# Format and prepare datasets
+train_dataset = train_dataset.map(format_chat_template)
+val_dataset = val_dataset.map(format_chat_template)
+
 print(f"Number of examples in the train set: {len(train_dataset)}")
-# print(f"Number of examples in the test set: {len(test_dataset)}")
 print(f"Number of examples in the validation set: {len(val_dataset)}")
 
-# Create and prepare model
-# def create_and_prepare_model():
-#     peft_config = LoraConfig(
-#         r=16,
-#         lora_alpha=32,
-#         lora_dropout=0.1,
-#         bias="none",
-#         task_type="CAUSAL_LM",
-#         target_modules=["att_proj", "attn_out", "ff_proj", "ff_out"]
-#     )
-#     model = AutoModelForCausalLM.from_pretrained(model_name).to('cuda:0')
-#     lora_model = get_peft_model(model, peft_config)
-
-#     tokenizer.pad_token = tokenizer.eos_token
-#     return lora_model, peft_config, tokenizer
-
 def create_and_prepare_model():
-    # peft_config = LoraConfig(
-    #     r=16,
-    #     lora_alpha=32,
-    #     lora_dropout=0.1,
-    #     bias="none",
-    #     task_type="CAUSAL_LM",
-    #     target_modules=["att_proj", "attn_out", "ff_proj", "ff_out"]
-    # )
-    peft_config = 1
-    model = AutoModelForCausalLM.from_pretrained(model_name).to('cuda:0')
-    # lora_model = get_peft_model(model, peft_config)
-
+    model = AutoModelForCausalLM.from_pretrained(model_name)
     tokenizer.pad_token = tokenizer.eos_token
-    return model, peft_config, tokenizer
+    return model, tokenizer
 
-
-
-model, peft_config, tokenizer = create_and_prepare_model()
+model, tokenizer = create_and_prepare_model()
 
 training_arguments = TrainingArguments(
     num_train_epochs=num_train_epochs,
+    gradient_checkpointing=gradient_checkpointing,
     output_dir=output_dir,
     per_device_train_batch_size=per_device_train_batch_size,
     gradient_accumulation_steps=gradient_accumulation_steps,
-    # optim="paged_adamw_8bit",
     save_total_limit=save_total_limit,
     logging_steps=logging_steps,
     learning_rate=learning_rate,
-    fp16=False,
+    fp16=True,
     bf16=False,
     evaluation_strategy="steps",
     eval_steps=eval_steps,
     warmup_steps=warmup_steps,
-    # group_by_length=True,
     lr_scheduler_type="linear",
     report_to='wandb',
     save_steps=save_steps,
     save_strategy="steps",
     metric_for_best_model="eval_loss",
-    greater_is_better=False, 
-    # use_cpu=True
+    greater_is_better=False,
+    load_best_model_at_end = True,
+    deepspeed="./z3.json",
 )
+
+
+
 
 trainer = SFTTrainer(
     model=model,
@@ -187,8 +131,10 @@ trainer = SFTTrainer(
     tokenizer=tokenizer,
     args=training_arguments,
     packing=True,
-)
 
+)
 trainer.train()
 
-model.save_pretrained("ez/olmo-sft-ez")
+
+
+model.save_pretrained("results/BEST_MODEL")
