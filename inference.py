@@ -1,59 +1,98 @@
-from typing import List, Tuple
-from utils import set_seed
+##### t0d0 
+#### -> add inference for stock phi3 on val set 
+######## -> add inference for mistral, mistral:instruct, llama3, llama2 using ollama (see gen_ds script for help)
+########## -> log all results to tables in a way thats easily comparable 
+### right now we arent using any metrics, mainly just logging results. We can do this later, so possibly log each models results to a jsonl file as well for easy comparision later 
+import os
 import torch
+from datasets import load_dataset, Dataset
 from transformers import (
-    AutoModelForCausalLM,
     AutoTokenizer,
+    TrainingArguments,
+    AutoModelForCausalLM,
+    TrainerCallback,
+    pipeline
 )
+from trl import SFTTrainer
 import wandb
+import json
+import random
 
-wandb.login(key="82cbd27eead1f27bb5cc79b0a83a3a70fd4595f0")
 
-set_seed(42)
+# Seed for reproducibility
+torch.manual_seed(42)
+random.seed(42)
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
+# Configuration
+model_name = "bdytx5/imm_moa_phi3_128k_instruct"
+max_seq_length = 1024
+train_file_path = './final_ds/train_completions.jsonl'
+val_file_path = './final_ds/test_completions.jsonl'
 
-def inference(model: str,  prompt: str) -> str:
-    """Runs inference on a model given a prompt. Returns the string output."""
-    tokenizer = AutoTokenizer.from_pretrained(model)
-    model = AutoModelForCausalLM.from_pretrained(
-        model,
-        device_map="auto",
-    )
-    model_input = tokenizer(prompt, return_tensors="pt").to(device)
+# Initialize tokenizer
+tokenizer = AutoTokenizer.from_pretrained("microsoft/Phi-3-mini-128k-instruct", trust_remote_code=True)
 
-    _ = model.eval()
-    with torch.no_grad():
-        out = model.generate(**model_input, max_new_tokens=100)
-    return tokenizer.decode(out[0], skip_special_tokens=True)
+def load_jsonl_data(file_path):
+    with open(file_path, 'r') as f:
+        data = [json.loads(line) for line in f]
+    return data
 
-def compare_inference(base_model: str, trained_model: str, inputs: List[str]) -> Tuple[List[str], List[str]]:
-    """Generates inference across the list of inputs for a base and a trained model."""
-    base_model_outputs = []
-    for x in inputs:
-        output = inference(base_model, x)
-        base_model_outputs.append(output)
+val_data = load_jsonl_data(val_file_path)
 
-    trained_model_outputs = []
-    for x in inputs:
-        output = inference(trained_model, x)
-        trained_model_outputs.append(output)
+# Convert data to Hugging Face Dataset format
+data_list_val = [dict(d) for d in val_data]
+val_dataset = Dataset.from_list(data_list_val)
 
-    return base_model_outputs, trained_model_outputs
+# Filter examples based on max_seq_length
+def filter_examples(example):
+    combined_text = example['input']
+    tokens = tokenizer.encode(combined_text)
+    return len(tokens) < max_seq_length
 
-def create_wandb_table(wandb_project_name: str, inputs: str, base_model_outputs: List[str], trained_model_outputs: List[str]):
-    run = wandb.init(
-        project=wandb_project_name,  # Project name.
-        name="log_dataset",          # name of the run within this project.
-        config={                     # Configuration dictionary.
-            "split": "test"
-        },
-    ) 
+val_dataset = val_dataset.filter(filter_examples)
 
-    data = []
-    for x, y, z in zip(inputs, base_model_outputs, trained_model_outputs):
-        data.append([x, y, z])
+# Format chat template
+def format_chat_template(example):
+    return {'text': f"You are a helpful assistant.\n{example['input']}\n<|{example['model_name']}|>\n{example['output']}\n"}
 
-    table = wandb.Table(data=data, columns=["input", "base_model_output", "trained_model_output"])
-    run.log({"compare_table": table})
-    run.finish()
+# Format and prepare datasets
+train_dataset = train_dataset.map(format_chat_template)
+val_dataset = val_dataset.map(format_chat_template)
+
+print(f"Number of examples in the train set: {len(train_dataset)}")
+print(f"Number of examples in the validation set: {len(val_dataset)}")
+
+# Simple inference script
+# Load the model and tokenizer for inference
+model = AutoModelForCausalLM.from_pretrained(
+    model_name,
+    device_map="cuda",  # Use CPU for inference
+    torch_dtype="auto",
+    trust_remote_code=True
+)
+
+# Initialize the text generation pipeline
+pipe = pipeline(
+    "text-generation",
+    model=model,
+    tokenizer=tokenizer,
+)
+
+# Define generation arguments
+generation_args = {
+    "max_new_tokens": 500,
+    "return_full_text": False,
+    "temperature": 0.0,
+    "do_sample": False,
+}
+
+# Run inference on the validation set
+def generate_output(example):
+    messages = example['text']
+    output = pipe(messages, **generation_args)
+    example['generated_text'] = output[0]['generated_text']
+    print(example)
+    return example
+
+# Apply the inference to the validation set
+val_dataset = val_dataset.map(generate_output)
