@@ -1,7 +1,6 @@
 ##### t0d0 
 #### -> add inference for stock phi3 on val set 
-######## -> add inference for mistral, mistral:instruct, llama3, llama2 using ollama (see gen_ds script for help)
-########## -> log all results to tables in a way thats easily comparable 
+########## -> log all results to wandb tables in a way thats easily comparable (eg same q's grouped together) (including original results from val dataset (group by id key in dataset) ) 
 ### right now we arent using any metrics, mainly just logging results. We can do this later, so possibly log each models results to a jsonl file as well for easy comparision later 
 import os
 import torch
